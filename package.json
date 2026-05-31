@@ -1,0 +1,16 @@
+{
+  "name": "pi-clickable-paths",
+  "version": "1.0.0",
+  "description": "OSC 8 hyperlinks on file paths in tool headings and assistant messages",
+  "keywords": ["pi-package"],
+  "main": "extensions/clickable-paths.ts",
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/1am2syman/pi-clickable-paths.git"
+  },
+  "license": "MIT"
+}
