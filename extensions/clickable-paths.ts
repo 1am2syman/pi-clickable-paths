@@ -21,14 +21,46 @@ import {
   createWriteTool,
 } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
-import { homedir } from "node:os";
+import { homedir, release } from "node:os";
 import { resolve } from "node:path";
+import { readFileSync } from "node:fs";
 
 // ── OSC 8 hyperlink helpers ──────────────────────────────────────────────────
 
 const OSC_OPEN = "\x1b]8;";
 const OSC_CLOSE = "\x1b]8;;\x07";
 const BEL = "\x07";
+
+// ── WSL detection (resolved once at load) ────────────────────────────────────
+//
+// Under WSL2, plain Linux file:// URIs (file://localhost/home/...) make Windows
+// Terminal look for C:\home\... and fail. We rewrite paths to Windows-resolvable
+// URIs using pure string conversion (no subprocess) on the render hot path.
+
+const IS_WSL = release().toLowerCase().includes("microsoft");
+const WSL_DISTRO = process.env.WSL_DISTRO_NAME; // e.g. "Ubuntu"
+const MNT_DRIVE_RE = /^\/mnt\/([a-z])(\/.*)?$/i; // /mnt/c[/...] -> C:
+const WIN_PATH_RE = /^([A-Za-z]):[\\/]/; // C:\... or C:/...
+
+/**
+ * Single-letter Windows drives actually mounted (drvfs/9p) under /mnt, read once
+ * from /proc/mounts. Only these map to `file:///X:/...`; an unmounted /mnt/<letter>
+ * is a normal Linux dir and must route via wsl.localhost instead.
+ */
+const WSL_DRIVES: Set<string> = (() => {
+  const drives = new Set<string>();
+  if (!IS_WSL) return drives;
+  try {
+    for (const line of readFileSync("/proc/mounts", "utf-8").split("\n")) {
+      const [, mountpoint, fstype] = line.split(" ");
+      const m = mountpoint?.match(/^\/mnt\/([a-z])$/);
+      if (m && (fstype === "9p" || fstype === "drvfs")) drives.add(m[1].toLowerCase());
+    }
+  } catch {
+    // Can't read mounts — leave empty; /mnt paths then route via wsl.localhost (safe).
+  }
+  return drives;
+})();
 
 /** Wrap text in an OSC 8 hyperlink. */
 function oscLink(text: string, uri: string): string {
@@ -43,11 +75,42 @@ function expandTilde(p: string): string {
 }
 
 function toFileUri(p: string): string {
+  const expanded = expandTilde(p);
+
+  // WSL: convert to a Windows-resolvable URI (pure string work, no subprocess).
+  if (IS_WSL) {
+    // 1. Windows-style input (C:\..., C:/...) — handle BEFORE resolve(), which
+    //    would otherwise mangle it into /home/.../C:/...
+    if (WIN_PATH_RE.test(expanded)) {
+      return `file://${encodeURI(`/${expanded.replace(/\\/g, "/")}`)}`;
+    }
+
+    let absolute: string;
+    try {
+      absolute = resolve(expanded);
+    } catch {
+      absolute = expanded;
+    }
+
+    // 2. /mnt/<drive>/... -> file:///C:/... (only if that drive is really mounted)
+    const mnt = absolute.match(MNT_DRIVE_RE);
+    if (mnt && WSL_DRIVES.has(mnt[1].toLowerCase())) {
+      return `file://${encodeURI(`/${mnt[1].toUpperCase()}:${mnt[2] ?? "/"}`)}`;
+    }
+
+    // 3. Any other Linux-native path -> file://wsl.localhost/<distro>/...
+    if (WSL_DISTRO && absolute.startsWith("/")) {
+      return `file://wsl.localhost${encodeURI(`/${WSL_DISTRO}${absolute}`)}`;
+    }
+    // else fall through to default (e.g. WSL_DISTRO unset — no worse than today)
+  }
+
+  // Non-WSL (and WSL fallback): plain localhost file:// URI.
   let absolute: string;
   try {
-    absolute = resolve(expandTilde(p));
+    absolute = resolve(expanded);
   } catch {
-    absolute = p;
+    absolute = expanded;
   }
   const forward = absolute.replace(/\\/g, "/");
   const pathPart = forward.match(/^[A-Za-z]:/) ? `/${forward}` : forward;
