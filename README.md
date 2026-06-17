@@ -31,7 +31,7 @@ form.
 ## Install
 
 ```bash
-pi install git:github.com/1am2syman/pi-clickable-paths@v1.0.0
+pi install git:github.com/1am2syman/pi-clickable-paths@v1.1.0
 ```
 
 ## License
