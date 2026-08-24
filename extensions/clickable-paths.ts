@@ -1,12 +1,20 @@
 /**
  * Clickable file paths in the pi TUI.
  *
- * Wraps file paths in tool call headings (read, edit, write) AND in
+ * Wraps file paths in tool call headings (read, edit, write, bash) AND in
  * assistant text messages with OSC 8 hyperlinks so you can Ctrl+Click
  * (or Cmd+Click) to open them with your default system viewer/editor.
  *
  * Terminal support: Kitty, iTerm2, Windows Terminal, WezTerm, Ghostty,
  * GNOME Terminal. Alacritty does NOT support OSC 8.
+ *
+ * Adapts to tools other extensions already provide: pi lets an extension
+ * replace a built-in tool by registering the same name (pi-fff replaces `read`,
+ * pi-bash-image replaces `bash`). Before wrapping read/edit/write/bash this
+ * extension asks pi who currently owns the name (getAllTools().sourceInfo) and
+ * backs off for tools that are already owned by another extension/sdk, so the
+ * enhanced implementation is preserved instead of being clobbered. OSC 8 stays
+ * active on the tools it does wrap and everywhere in assistant text.
  *
  * Usage:
  *   Drop in ~/.pi/agent/extensions/clickable-paths.ts (auto-loaded).
@@ -195,13 +203,55 @@ function stripOsc8FromContent(content: unknown): unknown {
 export default function (pi: ExtensionAPI) {
   const cwd = process.cwd();
 
+  // ── Adapt to tools this session already provides ─────────────────────────
+  //
+  // pi lets any extension replace a built-in tool by registering a tool under
+  // the same name. Other extensions do exactly that for tools we'd otherwise
+  // wrap:
+  //   - pi-fff        provides its own FFF-enhanced `read` (fuzzy resolution)
+  //   - pi-bash-image provides its own `bash` (__PI_IMAGE__ inline images)
+  //
+  // If we blindly re-register `read`/`bash` (via createReadTool/createBashTool)
+  // we clobber those enhanced implementations, and pi refuses to load the later
+  // conflicting extension ("Tool \"read\" conflicts with …"). So we ask pi who
+  // currently owns each tool name via getAllTools().sourceInfo and only wrap
+  // tools that are still the plain built-in. For extension/sdk-owned tools we
+  // back off and keep the enhanced implementation intact — OSC 8 stays active
+  // on the tools we do wrap and everywhere in assistant text messages.
+
+  const toolSource = (name: string): string | undefined => {
+    try {
+      return pi.getAllTools().find((t) => t.name === name)?.sourceInfo?.source;
+    } catch {
+      return undefined;
+    }
+  };
+
+  /** True when `name` is still owned by the plain built-in and safe to wrap. */
+  const isBuiltinTool = (name: string): boolean => {
+    const source = toolSource(name);
+    if (source === undefined) return true; // can't inspect — keep legacy behavior
+    return source === "builtin";
+  };
+
+  /** Wrap a tool's registration; backs off (false) when an extension owns it. */
+  const wrapTool = (name: string): boolean => {
+    if (isBuiltinTool(name)) return true;
+    console.error(
+      `[clickable-paths] Not wrapping "${name}" — it is already provided by ${toolSource(name)} ` +
+        "(extension/sdk tool). Its enhanced behavior is preserved; OSC 8 heading " +
+        "styling is skipped for this tool.",
+    );
+    return false;
+  };
+
   // --- Strip OSC 8 links from LLM context so escapes are display-only ---
   pi.on("context", async (event) => {
     return {
       messages: event.messages.map((message) => ({
         ...message,
         content: stripOsc8FromContent((message as any).content),
-      })),
+      })) as typeof event.messages,
     };
   });
 
@@ -219,81 +269,105 @@ export default function (pi: ExtensionAPI) {
     return { message: { ...event.message, content: modified } };
   });
 
-  // --- Read ---
-  const origRead = createReadTool(cwd);
-  pi.registerTool({
-    name: "read",
-    label: "read",
-    description: origRead.description,
-    parameters: origRead.parameters,
+  // --- Wrap built-in tools with OSC 8 headings ---
+  //
+  // Deferred to session_start so the ownership check sees the final tool
+  // registry. Extension load order is not fixed: `-e` flags can load before
+  // npm-installed extensions, so a check at factory time could still see
+  // `read`/`bash` as builtin and then clobber pi-fff / pi-bash-image that load
+  // afterwards (pi drops the later conflicting extension with a hard
+  // "Failed to load extension" error). By session_start every extension has
+  // loaded and getAllTools() reflects who actually owns each name.
+  const registerWrappedTools = () => {
+    // --- Read ---
+    if (wrapTool("read")) {
+      const origRead = createReadTool(cwd);
+      pi.registerTool({
+        name: "read",
+        label: "read",
+        description: origRead.description,
+        parameters: origRead.parameters,
 
-    async execute(toolCallId, params, signal, onUpdate) {
-      return origRead.execute(toolCallId, params, signal, onUpdate);
-    },
+        async execute(toolCallId, params, signal, onUpdate) {
+          return origRead.execute(toolCallId, params, signal, onUpdate);
+        },
 
-    renderCall(args, theme, _context) {
-      let text = theme.fg("toolTitle", theme.bold("read "));
-      text += theme.fg("accent", clickablePath(args.path));
-      if (args.offset || args.limit) {
-        const parts: string[] = [];
-        if (args.offset) parts.push(`offset=${args.offset}`);
-        if (args.limit) parts.push(`limit=${args.limit}`);
-        text += theme.fg("dim", ` (${parts.join(", ")})`);
-      }
-      return new Text(text, 0, 0);
-    },
-  });
+        renderCall(args, theme, _context) {
+          let text = theme.fg("toolTitle", theme.bold("read "));
+          text += theme.fg("accent", clickablePath(args.path));
+          if (args.offset || args.limit) {
+            const parts: string[] = [];
+            if (args.offset) parts.push(`offset=${args.offset}`);
+            if (args.limit) parts.push(`limit=${args.limit}`);
+            text += theme.fg("dim", ` (${parts.join(", ")})`);
+          }
+          return new Text(text, 0, 0);
+        },
+      });
+    }
 
-  // --- Edit ---
-  const origEdit = createEditTool(cwd);
-  pi.registerTool({
-    name: "edit",
-    label: "edit",
-    description: origEdit.description,
-    parameters: origEdit.parameters,
+    // --- Edit ---
+    if (wrapTool("edit")) {
+      const origEdit = createEditTool(cwd);
+      pi.registerTool({
+        name: "edit",
+        label: "edit",
+        description: origEdit.description,
+        parameters: origEdit.parameters,
 
-    async execute(toolCallId, params, signal, onUpdate) {
-      return origEdit.execute(toolCallId, params, signal, onUpdate);
-    },
+        async execute(toolCallId, params, signal, onUpdate) {
+          return origEdit.execute(toolCallId, params, signal, onUpdate);
+        },
 
-    renderCall(args, theme, _context) {
-      let text = theme.fg("toolTitle", theme.bold("edit "));
-      text += theme.fg("accent", clickablePath(args.path));
-      return new Text(text, 0, 0);
-    },
-  });
+        renderCall(args, theme, _context) {
+          let text = theme.fg("toolTitle", theme.bold("edit "));
+          text += theme.fg("accent", clickablePath(args.path));
+          return new Text(text, 0, 0);
+        },
+      });
+    }
 
-  // --- Write ---
-  const origWrite = createWriteTool(cwd);
-  pi.registerTool({
-    name: "write",
-    label: "write",
-    description: origWrite.description,
-    parameters: origWrite.parameters,
+    // --- Write ---
+    if (wrapTool("write")) {
+      const origWrite = createWriteTool(cwd);
+      pi.registerTool({
+        name: "write",
+        label: "write",
+        description: origWrite.description,
+        parameters: origWrite.parameters,
 
-    async execute(toolCallId, params, signal, onUpdate) {
-      return origWrite.execute(toolCallId, params, signal, onUpdate);
-    },
+        async execute(toolCallId, params, signal, onUpdate) {
+          return origWrite.execute(toolCallId, params, signal, onUpdate);
+        },
 
-    renderCall(args, theme, _context) {
-      let text = theme.fg("toolTitle", theme.bold("write "));
-      text += theme.fg("accent", clickablePath(args.path));
-      const lineCount = args.content.split("\n").length;
-      text += theme.fg("dim", ` (${lineCount} lines)`);
-      return new Text(text, 0, 0);
-    },
-  });
+        renderCall(args, theme, _context) {
+          let text = theme.fg("toolTitle", theme.bold("write "));
+          text += theme.fg("accent", clickablePath(args.path));
+          const lineCount = args.content.split("\n").length;
+          text += theme.fg("dim", ` (${lineCount} lines)`);
+          return new Text(text, 0, 0);
+        },
+      });
+    }
 
-  // --- Bash (passthrough, keeps default rendering) ---
-  const origBash = createBashTool(cwd);
-  pi.registerTool({
-    name: "bash",
-    label: "bash",
-    description: origBash.description,
-    parameters: origBash.parameters,
+    // --- Bash (passthrough, keeps default rendering) ---
+    if (wrapTool("bash")) {
+      const origBash = createBashTool(cwd);
+      pi.registerTool({
+        name: "bash",
+        label: "bash",
+        description: origBash.description,
+        parameters: origBash.parameters,
 
-    async execute(toolCallId, params, signal, onUpdate) {
-      return origBash.execute(toolCallId, params, signal, onUpdate);
-    },
+        async execute(toolCallId, params, signal, onUpdate) {
+          return origBash.execute(toolCallId, params, signal, onUpdate);
+        },
+      });
+    }
+  };
+
+  // Defer wrapping until session_start — see comment above.
+  pi.on("session_start", () => {
+    registerWrappedTools();
   });
 }
