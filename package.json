@@ -1,6 +1,6 @@
 {
   "name": "pi-clickable-paths",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "OSC 8 hyperlinks on file paths in tool headings and assistant messages (adapts to fff/bash-image overrides)",
   "type": "module",
   "scripts": {

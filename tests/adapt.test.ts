@@ -71,14 +71,8 @@ test("backs off read/bash when another extension owns them", () => {
 	const names = registered.map((t: any) => t.name).sort();
 	assert.deepEqual(names, ["edit", "write"], "only builtin-owned tools get wrapped");
 
-	assert.ok(
-		notices.some((n) => n.includes('Not wrapping "read"') && n.includes("pi-fff")),
-		"should print a back-off notice for read",
-	);
-	assert.ok(
-		notices.some((n) => n.includes('Not wrapping "bash"') && n.includes("pi-bash-image")),
-		"should print a back-off notice for bash",
-	);
+	// Backing off must be silent — no console noise in the TUI.
+	assert.equal(notices.length, 0, "must not print any back-off notice");
 });
 
 test("wraps all four tools when everything is builtin (vanilla pi)", () => {
@@ -93,7 +87,7 @@ test("wraps all four tools when everything is builtin (vanilla pi)", () => {
 	assert.deepEqual(names, ["bash", "edit", "read", "write"]);
 });
 
-test("backing off prints no notice and does not register for the skipped tool", () => {
+test("backing off is silent and does not register the skipped tool", () => {
 	const { registered, notices } = boot([
 		fffOwned,
 		builtin("edit"),
@@ -103,7 +97,7 @@ test("backing off prints no notice and does not register for the skipped tool", 
 
 	const names = registered.map((t: any) => t.name).sort();
 	assert.deepEqual(names, ["bash", "edit", "write"]);
-	assert.ok(!notices.some((n) => n.includes('Not wrapping "edit"')));
+	assert.equal(notices.length, 0, "must not print any back-off notice");
 });
 
 test("registers the context, message_end and session_start hooks", () => {
