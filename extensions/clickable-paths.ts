@@ -235,15 +235,7 @@ export default function (pi: ExtensionAPI) {
   };
 
   /** Wrap a tool's registration; backs off (false) when an extension owns it. */
-  const wrapTool = (name: string): boolean => {
-    if (isBuiltinTool(name)) return true;
-    console.error(
-      `[clickable-paths] Not wrapping "${name}" — it is already provided by ${toolSource(name)} ` +
-        "(extension/sdk tool). Its enhanced behavior is preserved; OSC 8 heading " +
-        "styling is skipped for this tool.",
-    );
-    return false;
-  };
+  const wrapTool = (name: string): boolean => isBuiltinTool(name);
 
   // --- Strip OSC 8 links from LLM context so escapes are display-only ---
   pi.on("context", async (event) => {

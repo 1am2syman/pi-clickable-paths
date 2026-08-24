@@ -30,8 +30,6 @@ the enhanced implementation intact:
 - In a **vanilla pi** (no other extension owns the tools): all of
   `read`/`edit`/`write`/`bash` headings are made clickable, as before.
 
-A one-line notice is printed at startup when a tool is intentionally skipped.
-
 ## Terminal support
 
 Kitty, iTerm2, Windows Terminal, WezTerm, Ghostty, GNOME Terminal.  
@@ -54,7 +52,7 @@ form.
 ## Install
 
 ```bash
-pi install git:github.com/1am2syman/pi-clickable-paths@v1.2.0
+pi install git:github.com/1am2syman/pi-clickable-paths@v1.2.1
 ```
 
 ## License
