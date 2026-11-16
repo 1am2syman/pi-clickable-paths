@@ -144,6 +144,22 @@ test("message_end wraps file paths in assistant text with an OSC 8 link", async 
 	assert.equal(result.message.content[1].thinking, "keep me");
 });
 
+test("message_end preserves Moshi visual directives while linking nearby paths", async () => {
+	const { hooks } = boot([fffOwned, bashImageOwned, builtin("edit"), builtin("write")]);
+	for (const newline of ["\n", "\r\n"]) {
+		const directive = '::moshi-visual{file="/home/user/.moshi/visuals/waterfall.html" title="Project finish waterfall"}';
+		const result = await hooks["message_end"][0]({
+			message: {
+				role: "assistant",
+				content: [{ type: "text", text: `See /tmp/notes.md${newline}${directive}${newline}Then /tmp/after.md` }],
+			},
+		});
+		const text = result.message.content[0].text as string;
+		assert.equal(text.split(newline)[1], directive, "directive must reach Moshi byte-for-byte");
+		assert.equal((text.match(/\x1b\]8;;file:\/\//g) ?? []).length, 2, "ordinary paths remain clickable");
+	}
+});
+
 test("message_end skips user messages", async () => {
 	const { pi, hooks, restore } = makePi([
 		fffOwned,

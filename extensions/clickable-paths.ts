@@ -174,10 +174,14 @@ function shouldWrapPath(candidate: string, ext: string): boolean {
 
 /** Replace file paths in text with OSC 8 clickable hyperlinks. */
 function wrapPathsInText(text: string): string {
-  return text.replace(FILE_PATH_RE, (full, prefix, candidate, ext) => {
-    if (!shouldWrapPath(candidate, ext)) return full;
-    return `${prefix}${clickablePath(candidate)}`;
-  });
+  // Moshi parses these standalone directives from the finalized message. OSC 8
+  // inside a file attribute corrupts its syntax, so preserve the complete line.
+  return text.split(/(^[ \t]*::moshi-visual\{[^\r\n]*\}[ \t]*\r?$)/m)
+    .map((part, index) => index % 2 ? part : part.replace(FILE_PATH_RE, (full, prefix, candidate, ext) => {
+      if (!shouldWrapPath(candidate, ext)) return full;
+      return `${prefix}${clickablePath(candidate)}`;
+    }))
+    .join("");
 }
 
 const OSC8_LINK_RE = /\x1b\]8;[^\x07]*\x07([\s\S]*?)\x1b\]8;;\x07/g;

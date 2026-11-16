@@ -7,6 +7,7 @@ Makes file paths clickable in the Pi TUI using OSC 8 hyperlinks.
 - Wraps file paths in **read**, **edit**, **write** tool headings with clickable links
 - Detects file paths in assistant text messages and makes them clickable too
 - Strips OSC 8 escapes before sending context to the LLM (display-only)
+- Preserves standalone Moshi visual directives so their file attributes reach Moshi without terminal escape codes
 - Detects **WSL** and rewrites paths to Windows-resolvable `file://` URIs
 
 ## Adapts to tools other extensions provide
@@ -54,6 +55,15 @@ form.
 ```bash
 pi install git:github.com/1am2syman/pi-clickable-paths@v1.2.1
 ```
+
+Run `/reload` after changing the extension in an active Pi session.
+
+## Verification
+
+Run `npm test` for the tool ownership and message-formatting regressions, including
+Moshi directive preservation with LF and CRLF line endings. Run `npm run typecheck`
+with the development dependencies installed. These checks verify message output;
+Moshi client rendering still needs an end-to-end check after reloading Pi.
 
 ## License
 
