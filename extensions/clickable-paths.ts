@@ -5,6 +5,12 @@
  * assistant text messages with OSC 8 hyperlinks so you can Ctrl+Click
  * (or Cmd+Click) to open them with your default system viewer/editor.
  *
+ * Assistant-text wrapping is DISPLAY-ONLY: it happens in a markdown
+ * transformer at TUI render time and never mutates the stored message.
+ * Everything that reads the session transcript — the model context,
+ * Moshi's Chat View, other mirrors — sees pristine text; OSC 8 escapes
+ * only ever exist inside the terminal renderer, where they work.
+ *
  * Terminal support: Kitty, iTerm2, Windows Terminal, WezTerm, Ghostty,
  * GNOME Terminal. Alacritty does NOT support OSC 8.
  *
@@ -172,16 +178,57 @@ function shouldWrapPath(candidate: string, ext: string): boolean {
   return true;
 }
 
-/** Replace file paths in text with OSC 8 clickable hyperlinks. */
-function wrapPathsInText(text: string): string {
-  // Moshi parses these standalone directives from the finalized message. OSC 8
-  // inside a file attribute corrupts its syntax, so preserve the complete line.
-  return text.split(/(^[ \t]*::moshi-visual\{[^\r\n]*\}[ \t]*\r?$)/m)
-    .map((part, index) => index % 2 ? part : part.replace(FILE_PATH_RE, (full, prefix, candidate, ext) => {
-      if (!shouldWrapPath(candidate, ext)) return full;
-      return `${prefix}${clickablePath(candidate)}`;
-    }))
+// Markdown structure the wrapper must leave alone: fenced code blocks, inline
+// code spans, [text](path.ext) link targets, and Moshi visual directives.
+
+const FENCE_OPEN_RE = /^ {0,3}(`{3,}|~{3,})/;
+const FENCE_CLOSE_RE = /^ {0,3}(`{3,}|~{3,})\s*$/;
+// Moshi parses these standalone directives from the finalized message. OSC 8
+// inside a file attribute corrupts its syntax, so preserve the complete line.
+const MOSHI_DIRECTIVE_RE = /^[ \t]*::moshi-visual\{[^\r\n]*\}[ \t]*\r?$/;
+const CODE_SPAN_RE = /(`+[^`]*`+)/;
+
+/** Wrap file paths in one prose line, outside inline code spans. */
+function wrapPathsInLine(line: string): string {
+  if (MOSHI_DIRECTIVE_RE.test(line)) return line;
+  return line
+    .split(CODE_SPAN_RE)
+    .map((part, index) => {
+      if (index % 2) return part; // inline code span — keep verbatim
+      return part.replace(FILE_PATH_RE, (full, prefix, candidate, ext, offset) => {
+        if (!shouldWrapPath(candidate, ext)) return full;
+        // Markdown link/image target — [alt](src/file.ts): OSC 8 in the URL
+        // would corrupt the link syntax, so leave it for the renderer.
+        if (prefix === "(" && offset > 0 && part[offset - 1] === "]") return full;
+        return `${prefix}${clickablePath(candidate)}`;
+      });
+    })
     .join("");
+}
+
+/**
+ * Replace file paths with OSC 8 clickable hyperlinks, skipping fenced code
+ * blocks. Render-time only — see registerMarkdownTransformer below.
+ */
+function wrapPathsInMarkdown(markdown: string): string {
+  let fence: { char: string; len: number } | undefined;
+  return markdown
+    .split("\n")
+    .map((line) => {
+      const active = fence;
+      if (active) {
+        const close = line.match(FENCE_CLOSE_RE);
+        if (close && close[1][0] === active.char && close[1].length >= active.len) fence = undefined;
+        return line;
+      }
+      const open = line.match(FENCE_OPEN_RE);
+      if (open) {
+        fence = { char: open[1][0], len: open[1].length };
+        return line;
+      }
+      return wrapPathsInLine(line);
+    })
+    .join("\n");
 }
 
 const OSC8_LINK_RE = /\x1b\]8;[^\x07]*\x07([\s\S]*?)\x1b\]8;;\x07/g;
@@ -241,7 +288,11 @@ export default function (pi: ExtensionAPI) {
   /** Wrap a tool's registration; backs off (false) when an extension owns it. */
   const wrapTool = (name: string): boolean => isBuiltinTool(name);
 
-  // --- Strip OSC 8 links from LLM context so escapes are display-only ---
+  // --- Strip OSC 8 links from LLM context ---
+  //
+  // Wrapping is display-only now, but sessions persisted by earlier versions
+  // of this extension still carry escapes in their stored assistant messages;
+  // this keeps them out of the model context when such a session resumes.
   pi.on("context", async (event) => {
     return {
       messages: event.messages.map((message) => ({
@@ -251,19 +302,23 @@ export default function (pi: ExtensionAPI) {
     };
   });
 
-  // --- Wrap file paths in assistant text messages with OSC 8 hyperlinks ---
-  pi.on("message_end", async (event) => {
-    if (event.message.role !== "assistant") return;
-    const content = event.message.content;
-    if (!Array.isArray(content)) return;
-
-    const modified = content.map((part) => {
-      if (part.type !== "text" || typeof part.text !== "string") return part;
-      return { ...part, text: wrapPathsInText(part.text) };
-    });
-
-    return { message: { ...event.message, content: modified } };
-  });
+  // --- Wrap file paths in assistant text with OSC 8 — display-only ---
+  //
+  // A markdown transformer runs at TUI render time and never touches the
+  // stored message, so the session transcript stays free of escape
+  // sequences. That is what fixed the Moshi leak: Moshi's Chat View reads
+  // the transcript raw and rendered the old message_end mutations as
+  // literal "]8;;file://…" text. stripOsc8 first also unwraps legacy
+  // persisted messages, which are then re-wrapped for the terminal only.
+  // The inner guard keeps us correct even on runtimes that ignore the
+  // messageTypes filter.
+  pi.registerMarkdownTransformer(
+    (markdown, { messageType }) => {
+      if (messageType !== "assistant") return markdown;
+      return wrapPathsInMarkdown(stripOsc8(markdown));
+    },
+    { messageTypes: ["assistant"] },
+  );
 
   // --- Wrap built-in tools with OSC 8 headings ---
   //

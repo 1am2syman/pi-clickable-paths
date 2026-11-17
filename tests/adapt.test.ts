@@ -20,6 +20,8 @@ function makePi(allTools: { name: string; sourceInfo: { source: ToolSource } }[]
 	const registered: any[] = [];
 	const hooks: Record<string, Function[]> = {};
 	const notices: string[] = [];
+	let markdownTransformer: Function | undefined;
+	let markdownTransformerOptions: unknown;
 	const realError = console.error;
 	console.error = (...args: any[]) => {
 		notices.push(args.join(" "));
@@ -31,10 +33,20 @@ function makePi(allTools: { name: string; sourceInfo: { source: ToolSource } }[]
 			on: (event: string, handler: Function) => {
 				(hooks[event] ??= []).push(handler);
 			},
+			registerMarkdownTransformer: (transformer: Function, options?: unknown) => {
+				markdownTransformer = transformer;
+				markdownTransformerOptions = options;
+			},
 		} as any,
 		registered,
 		hooks,
 		notices,
+		get transformer() {
+			return markdownTransformer;
+		},
+		get transformerOptions() {
+			return markdownTransformerOptions;
+		},
 		restore: () => {
 			console.error = realError;
 		},
@@ -58,6 +70,17 @@ function boot(allTools: { name: string; sourceInfo: { source: ToolSource } }[]) 
 	env.hooks["session_start"]?.forEach((h: Function) => h({}));
 	env.restore();
 	return env;
+}
+
+interface TransformContext {
+	messageType: string;
+	isStreaming?: boolean;
+	availableWidth?: number;
+}
+
+function transform(env: ReturnType<typeof makePi>, markdown: string, ctx: TransformContext = { messageType: "assistant" }): string {
+	assert.ok(env.transformer, "markdown transformer registered");
+	return (env.transformer as Function)(markdown, { isStreaming: false, availableWidth: 120, ...ctx });
 }
 
 test("backs off read/bash when another extension owns them", () => {
@@ -100,78 +123,94 @@ test("backing off is silent and does not register the skipped tool", () => {
 	assert.equal(notices.length, 0, "must not print any back-off notice");
 });
 
-test("registers the context, message_end and session_start hooks", () => {
-	const { pi, hooks, restore } = makePi([
-		fffOwned,
-		bashImageOwned,
-		builtin("edit"),
-		builtin("write"),
-	]);
-	factory(pi as any);
-	restore();
-	assert.ok(hooks["context"]?.length, "context hook registered");
-	assert.ok(hooks["message_end"]?.length, "message_end hook registered");
-	assert.ok(hooks["session_start"]?.length, "session_start hook registered");
+test("registers the context hook, markdown transformer and session_start hook — no message_end", () => {
+	const env = makePi([fffOwned, bashImageOwned, builtin("edit"), builtin("write")]);
+	factory(env.pi);
+	env.restore();
+	assert.ok(env.hooks["context"]?.length, "context hook registered");
+	assert.ok(env.hooks["session_start"]?.length, "session_start hook registered");
+	assert.ok(env.hooks["message_end"]?.length === undefined, "message_end must NOT be registered (it pollutes the transcript)");
+	assert.ok(env.transformer, "markdown transformer registered");
 });
 
-test("message_end wraps file paths in assistant text with an OSC 8 link", async () => {
-	const { pi, hooks, restore } = makePi([
-		fffOwned,
-		bashImageOwned,
-		builtin("edit"),
-		builtin("write"),
-	]);
-	factory(pi as any);
-	restore();
+ test("transformer restricts itself to assistant surfaces via messageTypes", () => {
+	const env = makePi([fffOwned, bashImageOwned, builtin("edit"), builtin("write")]);
+	factory(env.pi);
+	env.restore();
+	assert.deepEqual(env.transformerOptions, { messageTypes: ["assistant"] });
+});
 
-	const hook = hooks["message_end"][0];
-	const result = await hook({
-		message: {
-			role: "assistant",
-			content: [
-				{ type: "text", text: "see src/foo.md now" },
-				{ type: "thinking", thinking: "keep me" },
-			],
-		},
-	});
-
-	const text = result.message.content[0].text as string;
+test("transformer wraps file paths in assistant text with an OSC 8 link", () => {
+	const env = boot([fffOwned, bashImageOwned, builtin("edit"), builtin("write")]);
+	const text = transform(env, "see src/foo.md now");
 	assert.ok(text.includes("\x1b]8;;file://"), "should contain an OSC 8 open sequence");
 	assert.ok(text.includes("src/foo.md"), "should keep the visible path");
 	assert.ok(text.includes("\x1b]8;;\x07"), "should close with the OSC 8 close sequence");
-
-	// non-text parts pass through untouched
-	assert.equal(result.message.content[1].thinking, "keep me");
 });
 
-test("message_end preserves Moshi visual directives while linking nearby paths", async () => {
-	const { hooks } = boot([fffOwned, bashImageOwned, builtin("edit"), builtin("write")]);
+test("transformer skips non-assistant surfaces", () => {
+	const env = boot([fffOwned, bashImageOwned, builtin("edit"), builtin("write")]);
+	for (const messageType of ["user", "assistant-thinking", "custom", "summary", "changelog"]) {
+		const text = transform(env, "see /tmp/notes.md now", { messageType });
+		assert.ok(!text.includes("\x1b]8;"), `${messageType} surface must stay untouched`);
+	}
+});
+
+test("transformer preserves Moshi visual directives while linking nearby paths", () => {
+	const env = boot([fffOwned, bashImageOwned, builtin("edit"), builtin("write")]);
 	for (const newline of ["\n", "\r\n"]) {
 		const directive = '::moshi-visual{file="/home/user/.moshi/visuals/waterfall.html" title="Project finish waterfall"}';
-		const result = await hooks["message_end"][0]({
-			message: {
-				role: "assistant",
-				content: [{ type: "text", text: `See /tmp/notes.md${newline}${directive}${newline}Then /tmp/after.md` }],
-			},
-		});
-		const text = result.message.content[0].text as string;
-		assert.equal(text.split(newline)[1], directive, "directive must reach Moshi byte-for-byte");
+		const text = transform(env, `See /tmp/notes.md${newline}${directive}${newline}Then /tmp/after.md`);
+		assert.equal(text.split(newline)[1], directive, "directive must stay byte-for-byte");
 		assert.equal((text.match(/\x1b\]8;;file:\/\//g) ?? []).length, 2, "ordinary paths remain clickable");
 	}
 });
 
-test("message_end skips user messages", async () => {
-	const { pi, hooks, restore } = makePi([
-		fffOwned,
-		bashImageOwned,
-		builtin("edit"),
-		builtin("write"),
-	]);
-	factory(pi as any);
-	restore();
-	const hook = hooks["message_end"][0];
-	const result = await hook({ message: { role: "user", content: [{ type: "text", text: "hello" }] } });
-	assert.equal(result, undefined, "user messages are left untouched");
+test("transformer leaves fenced code blocks untouched", () => {
+	const env = boot([fffOwned, bashImageOwned, builtin("edit"), builtin("write")]);
+	const md = [
+		"Edit /tmp/before.md like this:",
+		"```ts",
+		'import x from "./inside-code-fence.md";',
+		"~~~",
+		"keeps /tmp/inside-tilde.md raw too",
+		"~~~",
+		"```",
+		"And /tmp/after.md here.",
+	].join("\n");
+	const text = transform(env, md);
+	const insideFence = text.split("```ts\n")[1].split("\n```")[0];
+	assert.ok(!insideFence.includes("\x1b]8;"), "no OSC 8 inside the backtick fence (tilde lines are fence content)");
+	assert.equal((text.match(/\x1b\]8;;file:\/\//g) ?? []).length, 2, "only the two prose paths are wrapped");
+
+	// A real tilde fence behaves the same way.
+	const md2 = ["~~~js", 'const p = "/tmp/inside-tilde.md";', "~~~", "And /tmp/after.md here."].join("\n");
+	const text2 = transform(env, md2);
+	assert.ok(!text2.split("~~~")[1].includes("\x1b]8;"), "no OSC 8 inside the tilde fence");
+	assert.equal((text2.match(/\x1b\]8;;file:\/\//g) ?? []).length, 1, "prose after the fence is wrapped");
+});
+
+test("transformer leaves inline code spans untouched", () => {
+	const env = boot([fffOwned, bashImageOwned, builtin("edit"), builtin("write")]);
+	const text = transform(env, "run `bash scripts/setup.sh` then see /tmp/notes.md");
+	assert.ok(text.includes("`bash scripts/setup.sh`"), "code span verbatim");
+	assert.ok(!text.split("`bash scripts/setup.sh`")[0].includes("\x1b]8;"), "no OSC 8 inside the span");
+	assert.equal((text.match(/\x1b\]8;;file:\/\//g) ?? []).length, 1, "prose path is wrapped");
+});
+
+test("transformer leaves markdown link targets alone", () => {
+	const env = boot([fffOwned, bashImageOwned, builtin("edit"), builtin("write")]);
+	const text = transform(env, "see [the guide](docs/guide.md) and also docs/plain.md");
+	assert.ok(text.includes("](docs/guide.md)"), "link target untouched");
+	assert.equal((text.match(/\x1b\]8;;file:\/\//g) ?? []).length, 1, "plain path is wrapped");
+});
+
+test("transformer unwraps legacy OSC 8 instead of double-wrapping", () => {
+	const env = boot([fffOwned, bashImageOwned, builtin("edit"), builtin("write")]);
+	const legacy = "see \x1b]8;;file://localhost/tmp/a.md\x07/tmp/a.md\x1b]8;;\x07 now";
+	const text = transform(env, legacy);
+	assert.equal((text.match(/\x1b\]8;/g) ?? []).length, 2, "exactly one open+close pair (single wrap)");
+	assert.ok(text.includes("\x1b]8;;file://localhost/tmp/a.md\x07/tmp/a.md\x1b]8;;\x07"), "re-wrapped once around the path");
 });
 
 test("context strips OSC 8 escapes so they never reach the model", async () => {

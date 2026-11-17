@@ -5,9 +5,10 @@ Makes file paths clickable in the Pi TUI using OSC 8 hyperlinks.
 ## What it does
 
 - Wraps file paths in **read**, **edit**, **write** tool headings with clickable links
-- Detects file paths in assistant text messages and makes them clickable too
-- Strips OSC 8 escapes before sending context to the LLM (display-only)
+- Detects file paths in assistant text messages and makes them clickable too — at TUI render time only (`registerMarkdownTransformer`), so the session transcript stays free of escape sequences (Moshi's Chat View and the model context see pristine text)
+- Strips OSC 8 escapes from LLM context (also cleans up sessions persisted by older versions)
 - Preserves standalone Moshi visual directives so their file attributes reach Moshi without terminal escape codes
+- Skips fenced code blocks, inline code spans, and markdown link targets when wrapping prose paths
 - Detects **WSL** and rewrites paths to Windows-resolvable `file://` URIs
 
 ## Adapts to tools other extensions provide
@@ -53,16 +54,25 @@ form.
 ## Install
 
 ```bash
-pi install git:github.com/1am2syman/pi-clickable-paths@v1.2.1
+pi install git:github.com/1am2syman/pi-clickable-paths@v1.3.0
 ```
 
 Run `/reload` after changing the extension in an active Pi session.
 
+## Why render-time wrapping
+
+Earlier versions wrapped paths in a `message_end` handler, which mutates the
+assistant message **as persisted**. Anything that reads the session transcript
+outside a terminal — Moshi's Chat View, the model context on resume — then saw
+raw `]8;;file://…` escape text. The markdown transformer applies OSC 8 only
+inside the TUI renderer; the stored message is never touched.
+
 ## Verification
 
-Run `npm test` for the tool ownership and message-formatting regressions, including
-Moshi directive preservation with LF and CRLF line endings. Run `npm run typecheck`
-with the development dependencies installed. These checks verify message output;
+Run `npm test` for the tool ownership and message-formatting regressions,
+including Moshi directive preservation (LF and CRLF), fence/code-span/link
+exclusion, and legacy-message unwrapping. Run `npm run typecheck` with the
+development dependencies installed. These checks verify message output;
 Moshi client rendering still needs an end-to-end check after reloading Pi.
 
 ## License
